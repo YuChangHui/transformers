@@ -14,14 +14,14 @@
 # limitations under the License.
 """ OpenPangu_v2 model configuration"""
 
-from transformers.configuration_utils import PretrainedConfig
+from transformers.configuration_utils import PreTrainedConfig
 from transformers.modeling_rope_utils import RopeParameters
 from transformers.utils import logging
 
 logger = logging.get_logger(__name__)
 
 
-class OpenPanguV2Config(PretrainedConfig):
+class OpenPanguV2Config(PreTrainedConfig):
     model_type = "openpangu_v2"
     keys_to_ignore_at_inference = ["past_key_values"]
 
@@ -57,7 +57,7 @@ class OpenPanguV2Config(PretrainedConfig):
         num_key_value_heads: int | None = None,
         head_dim: int | None = None,
         v_head_dim: int | None = None,
-        use_mla: bool | None = False,
+        use_mla: bool | None = True,
         n_shared_experts: int | None = None,
         n_routed_experts: int | None = None,
         routed_scaling_factor: float | None = None,
@@ -189,3 +189,7 @@ class OpenPanguV2Config(PretrainedConfig):
             )
 
         super().__init__(**kwargs)
+
+
+
+__all__ = ["OpenPanguV2Config"]

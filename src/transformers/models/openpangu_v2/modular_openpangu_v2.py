@@ -486,129 +486,6 @@ class OpenPanguV2MLP(LlamaMLP):
         self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=False)
 
 
-class OpenPanguV2Attention(LlamaAttention):
-    def __init__(self, config: OpenPanguV2Config, layer_idx: int):
-        super().__init__(config, layer_idx)
-        self.layer_type = config.layer_types[layer_idx] if hasattr(config, "layer_types") else None
-        self.sliding_window = config.sliding_window if self.layer_type == "sliding_attention" else None
-        self.hidden_size = config.hidden_size
-        self.num_attention_heads = config.num_attention_heads
-        self.num_key_value_heads = config.num_key_value_heads
-        partial_rotary_factor = config.rope_parameters.get("partial_rotary_factor", 1.0)
-        self.rotary_ndims = int(self.head_dim * partial_rotary_factor)
-        self.v_head_dim = config.v_head_dim if config.v_head_dim is not None else config.head_dim
-
-        self.attn_groupnorm = config.attn_groupnorm
-        self.attn_elementwise_gate = config.attn_elementwise_gate
-        self.param_sink_number = config.param_sink_number
-        self.attn_k_layernorm  = config.attn_k_layernorm
-
-        if self.param_sink_number > 0:
-            self.param_sink_key = torch.nn.Parameter(
-                torch.empty(
-                    (self.param_sink_number, self.num_key_value_heads, self.head_dim),
-                    dtype=config.torch_dtype,
-                )
-            )
-            self.param_sink_value = torch.nn.Parameter(
-                torch.empty(
-                    (self.param_sink_number, self.num_key_value_heads, self.v_head_dim),
-                    dtype=config.torch_dtype,
-                )
-            )
-        
-        if self.attn_groupnorm:
-            self.groupnorm = OpenPanguV2RMSNorm(hidden_size=self.head_dim, eps=config.rms_norm_eps)
-        
-        if self.attn_elementwise_gate:
-            self.attention_gate = nn.Linear(config.hidden_size, config.num_attention_heads * self.head_dim, bias=False)
-
-        if self.attn_k_layernorm:
-            self.k_layernorm = OpenPanguV2RMSNorm(hidden_size=self.head_dim, eps=config.rms_norm_eps)
-        
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        position_embeddings: tuple[torch.Tensor, torch.Tensor],
-        attention_mask: Optional[torch.Tensor],
-        past_key_values: Optional[Cache] = None,
-        cache_position: Optional[torch.LongTensor] = None,
-        **kwargs: Unpack[TransformersKwargs],
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[tuple[torch.Tensor]]]:
-        if self.attn_elementwise_gate:
-            gate_score = self.attention_gate(hidden_states)
-        else:
-            gate_score = None
-
-        input_shape = hidden_states.shape[:-1]
-        hidden_shape = (*input_shape, -1, self.head_dim)
-
-        query_states = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
-        key_states = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
-        value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
-
-        if self.attn_k_layernorm:
-            key_states = self.k_layernorm(key_states)
-        
-        cos, sin = position_embeddings
-        # Partial rotary embedding
-        query_rot, query_pass = (
-            query_states[..., : self.rotary_ndims],
-            query_states[..., self.rotary_ndims :],
-        )
-        key_rot, key_pass = (
-            key_states[..., : self.rotary_ndims],
-            key_states[..., self.rotary_ndims :],
-        )
-        # [batch_size, seq_length, num_heads, head_dim * config.partial_rotary_factor]
-        query_rot, key_rot = apply_rotary_pos_emb(query_rot, key_rot, cos, sin)
-
-        # [batch_size, seq_length, num_heads, head_dim]
-        query_states = torch.cat((query_rot, query_pass), dim=-1)
-        key_states = torch.cat((key_rot, key_pass), dim=-1)
-
-        if past_key_values is not None:
-            # sin and cos are specific to RoPE models; cache_position needed for the static cache
-            cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
-            key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx, cache_kwargs)
-
-        if self.param_sink_number > 0:
-            # [b, n, s, d]
-            batch_size, kv_seq_len = key_states.shape[0], key_states.shape[2]
-            param_sink_key = self.param_sink_key.permute(1, 0, 2).unsqueeze(0).expand(batch_size, -1, -1, -1).to(key_states.device)
-            param_sink_value = self.param_sink_value.permute(1, 0, 2).unsqueeze(0).expand(batch_size, -1, -1, -1).to(value_states.device)
-            key_states = torch.cat([param_sink_key, key_states], dim=2)
-            value_states = torch.cat([param_sink_value, value_states], dim=2)
-            kv_seq_len += self.param_sink_number
-
-            attention_mask = torch.nn.functional.pad(attention_mask, (self.param_sink_number, 0), value=0.0)
-
-        attention_interface: Callable = eager_attention_forward
-        if self.config._attn_implementation != "eager":
-            attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
-        
-        attn_output, attn_weights = attention_interface(
-            self,
-            query_states,
-            key_states,
-            value_states,
-            attention_mask,
-            dropout=0.0 if not self.training else self.attention_dropout,
-            scaling=self.scaling,
-            sliding_window=self.sliding_window,
-            **kwargs,
-        )
-
-        if self.attn_groupnorm:
-            attn_output = self.groupnorm(attn_output)
-        if self.attn_elementwise_gate:
-            attn_output *= gate_score.sigmoid().view(attn_output.shape)    
-
-        attn_output = attn_output.reshape(*input_shape, -1).contiguous()
-        attn_output = self.o_proj(attn_output)
-        return attn_output, attn_weights
-
-
 class OpenPanguV2MLAAttention(nn.Module):
     def __init__(self, config: OpenPanguV2Config, layer_idx: int):
         super().__init__()
@@ -660,7 +537,16 @@ class OpenPanguV2MLAAttention(nn.Module):
                 self.scaling = self.scaling * mscale * mscale
 
         self.layer_type = config.layer_types[layer_idx] if hasattr(config, "layer_types") else None
-        self.sliding_window = config.sliding_window if self.layer_type == "sliding_attention" else None
+        if self.layer_type == "sliding_attention":
+            if hasattr(config, 'sliding_window_list') and config.sliding_window_list is not None:
+                # Map swa_layers index to sliding_window_list index
+                assert layer_idx in config.swa_layers, (f"swa layer {layer_idx} not in config.swa_layers")
+                swa_idx = config.swa_layers.index(layer_idx)
+                self.sliding_window = config.sliding_window_list[swa_idx]
+            else:
+                raise ValueError("No sliding_window_list in the configuration file")
+        else:
+            self.sliding_window = None
 
         self.param_sink_number = config.param_sink_number
         if self.param_sink_number > 0:
@@ -910,10 +796,7 @@ class OpenPanguV2DecoderLayer(LlamaDecoderLayer):
         nn.Module.__init__(self)
         self.hidden_size = config.hidden_size
 
-        if config.use_mla:
-            self.self_attn = OpenPanguV2MLAAttention(config=config, layer_idx=layer_idx)
-        else:
-            self.self_attn = OpenPanguV2Attention(config=config, layer_idx=layer_idx)
+        self.self_attn = OpenPanguV2MLAAttention(config=config, layer_idx=layer_idx)
         self.attention_type = config.layer_types[layer_idx]
 
         if config.first_k_dense_replace > 0 and layer_idx >= config.first_k_dense_replace:
