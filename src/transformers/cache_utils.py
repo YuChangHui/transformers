@@ -1481,6 +1481,7 @@ class DynamicCache(Cache):
             sliding_window = getattr(decoder_config, "sliding_window", None) or getattr(
                 decoder_config, "attention_chunk_size", None
             )
+            sliding_window_list = getattr(decoder_config, "sliding_window_list", None)
             layer_types = getattr(decoder_config, "layer_types", None)
             if layer_types is None:
                 layer_types = []
@@ -1496,6 +1497,20 @@ class DynamicCache(Cache):
             for layer_type in layer_types:
                 cache_cls = LAYER_TYPE_CACHE_MAPPING.get(layer_type, DynamicLayer)
                 layers.append(cache_cls(decoder_config))
+            # print(f"[YCHDEBUG] layer_types len is {len(layer_types)}", flush=True)
+            # print(f"[YCHDEBUG] sliding_window_list len is {len(sliding_window_list)}", flush=True)
+            # for layer_idx, layer_type in enumerate(layer_types):
+            #     cache_cls = LAYER_TYPE_CACHE_MAPPING.get(layer_type, DynamicLayer)
+            #     if cache_cls == DynamicSlidingWindowLayer and sliding_window_list is not None:
+            #         # Get per-layer sliding_window
+            #         if layer_idx in decoder_config.swa_layers:
+            #             layer_pos = decoder_config.swa_layers.index(layer_idx)
+            #             layer_sliding_window = sliding_window_list[layer_pos]
+            #             layers.append(cache_cls(sliding_window=layer_sliding_window))
+            #         else:
+            #             layers.append(cache_cls(decoder_config))
+            #     else:
+            #         layers.append(cache_cls(decoder_config))
 
         # In this case, use the passed data to already fill in the Cache
         if ddp_cache_data is not None:

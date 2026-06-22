@@ -79,6 +79,7 @@ class OpenPanguV2Config(PreTrainedConfig):
         rope_parameters: RopeParameters | dict[str, RopeParameters] | None = None,
         rope_interleave: bool | None = False,
         sliding_window: int | list[int] | None = None,
+        sliding_window_list: list[int] | None = None,
         swa_layers: list[str] | None = None,
         layer_types: list[str] | None = None,
         attention_dropout: float | None = 0.0,
@@ -149,6 +150,7 @@ class OpenPanguV2Config(PreTrainedConfig):
         self.bos_token_id = bos_token_id
         self.eos_token_id = eos_token_id
         self.sliding_window = sliding_window
+        self.sliding_window_list = sliding_window_list
         self.swa_layers = swa_layers
         self.tie_word_embeddings = tie_word_embeddings
 
@@ -181,12 +183,20 @@ class OpenPanguV2Config(PreTrainedConfig):
                 ]
             else:
                 self.layer_types = ["full_attention" for _ in range(self.num_hidden_layers)]
+
+        print(f"[YCHDEUBG] sliding_window_list is {self.sliding_window_list}", flush=True)
+        print(f"[YCHDEUBG] sliding_window is {self.sliding_window}", flush=True)
+
+        if self.sliding_window_list and self.sliding_window is None:
+            self.sliding_window = self.sliding_window_list[0]
+            print(f"[YCHDEUBG] sliding_window is {self.sliding_window}", flush=True)
         
         if num_hidden_layers is not None and self.layer_types is not None and len(self.layer_types) != num_hidden_layers:
             raise ValueError(
                 f"`num_hidden_layers` ({num_hidden_layers}) must be equal to the number of layer types "
                 f"({len(layer_types)})"
             )
+        # print(f"[YCHDEBUG] kwargs is {kwargs}", flush=True)
 
         super().__init__(**kwargs)
 

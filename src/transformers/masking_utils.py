@@ -1184,6 +1184,7 @@ def create_sliding_window_causal_mask(
         return attention_mask
 
     sliding_window = getattr(config, "sliding_window", None)
+    # print(f"[YCHDEBUG] config is {config}", flush=True)
     if sliding_window is None:
         raise ValueError("Could not find a `sliding_window` argument in the config, or it is not set")
 

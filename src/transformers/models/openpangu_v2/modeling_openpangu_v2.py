@@ -668,16 +668,15 @@ class OpenPanguV2MLAAttention(nn.Module):
                 self.scaling = self.scaling * mscale * mscale
 
         self.layer_type = config.layer_types[layer_idx] if hasattr(config, "layer_types") else None
-        print(f"[YCHDEBUG] {layer_idx} layer type is {self.layer_type}")
         if self.layer_type == "sliding_attention":
-            if hasattr(config, "sliding_window_list") and config.sliding_window_list is not None:
-                # Map swa_layers index to sliding_window_list index
-                assert layer_idx in config.swa_layers, f"swa layer {layer_idx} not in config.swa_layers"
-                swa_idx = config.swa_layers.index(layer_idx)
-                self.sliding_window = config.sliding_window_list[swa_idx]
-                print(f"[YCHDEBUG] {layer_idx} layer window size is {self.sliding_window}")
-            else:
-                raise ValueError("No sliding_window_list in the configuration file")
+            self.sliding_window = config.sliding_window
+            # if hasattr(config, 'sliding_window_list') and config.sliding_window_list is not None:
+            #     # Map swa_layers index to sliding_window_list index
+            #     assert layer_idx in config.swa_layers, (f"swa layer {layer_idx} not in config.swa_layers")
+            #     swa_idx = config.swa_layers.index(layer_idx)
+            #     self.sliding_window = config.sliding_window_list[swa_idx]
+            # else:
+            #     raise ValueError("No sliding_window_list in the configuration file")
         else:
             self.sliding_window = None
 
@@ -734,7 +733,7 @@ class OpenPanguV2MLAAttention(nn.Module):
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
         attention_mask: torch.Tensor | None,
         past_key_values: Cache | None = None,
-        cache_position: torch.LongTensor | None = None,
+        # cache_position: torch.LongTensor | None = None,
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]:
         batch_size, seq_length = hidden_states.shape[:-1]
@@ -783,8 +782,8 @@ class OpenPanguV2MLAAttention(nn.Module):
 
         if past_key_values is not None:
             # sin and cos are specific to RoPE models; cache_position needed for the static cache
-            cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
-            key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx, cache_kwargs)
+            # cache_kwargs = {"sin": sin, "cos": cos}
+            key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx)
 
         if self.use_dsa:
             indexer_mask = (
@@ -1034,7 +1033,7 @@ class OpenPanguV2DecoderLayer(GradientCheckpointingLayer):
         position_ids: torch.LongTensor | None = None,
         past_key_values: Cache | None = None,
         use_cache: bool | None = False,
-        cache_position: torch.LongTensor | None = None,
+        # cache_position: Optional[torch.LongTensor] = None,
         position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = None,  # necessary, but kept here for BC
         **kwargs: Unpack[TransformersKwargs],
     ) -> torch.Tensor:
@@ -1051,7 +1050,7 @@ class OpenPanguV2DecoderLayer(GradientCheckpointingLayer):
             position_ids=position_ids,
             past_key_values=past_key_values,
             use_cache=use_cache,
-            cache_position=cache_position,
+            # cache_position=cache_position,
             position_embeddings=position_embeddings,
             **kwargs,
         )
@@ -1226,7 +1225,7 @@ class OpenPanguV2Model(OpenPanguV2PreTrainedModel):
         past_key_values: Cache | None = None,
         inputs_embeds: torch.FloatTensor | None = None,
         use_cache: bool | None = None,
-        cache_position: torch.LongTensor | None = None,
+        # cache_position: torch.LongTensor | None = None,
         **kwargs: Unpack[TransformersKwargs],
     ) -> BaseModelOutputWithPast:
         if (input_ids is None) ^ (inputs_embeds is not None):
@@ -1238,23 +1237,27 @@ class OpenPanguV2Model(OpenPanguV2PreTrainedModel):
         if use_cache and past_key_values is None:
             past_key_values = DynamicCache(config=self.config)
 
-        if cache_position is None:
-            past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
-            cache_position = torch.arange(
-                past_seen_tokens, past_seen_tokens + inputs_embeds.shape[1], device=inputs_embeds.device
-            )
+        # if cache_position is None:
+        # past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
+        # cache_position = torch.arange(
+        #     past_seen_tokens, past_seen_tokens + inputs_embeds.shape[1], device=inputs_embeds.device
+        # )
 
         if position_ids is None:
-            position_ids = cache_position.unsqueeze(0)
+            past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
+            position_ids = torch.arange(
+                past_seen_tokens, past_seen_tokens + inputs_embeds.shape[1], device=inputs_embeds.device
+            )
+            position_ids = position_ids.unsqueeze(0)
 
         # It may already have been prepared by e.g. `generate`
         if not isinstance(causal_mask_mapping := attention_mask, dict):
             # Prepare mask arguments
             mask_kwargs = {
                 "config": self.config,
-                "input_embeds": inputs_embeds,
+                "inputs_embeds": inputs_embeds,
                 "attention_mask": attention_mask,
-                "cache_position": cache_position,
+                # "cache_position": cache_position,
                 "past_key_values": past_key_values,
                 "position_ids": position_ids,
             }
@@ -1280,7 +1283,7 @@ class OpenPanguV2Model(OpenPanguV2PreTrainedModel):
                 position_ids=position_ids,
                 past_key_values=past_key_values,
                 use_cache=use_cache,
-                cache_position=cache_position,
+                # cache_position=cache_position,
                 **kwargs,
             )
 
