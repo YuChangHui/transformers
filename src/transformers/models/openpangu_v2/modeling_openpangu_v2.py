@@ -531,6 +531,212 @@ class OpenPanguV2MLP(nn.Module):
         return down_proj
 
 
+def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
+    """
+    This is the equivalent of torch.repeat_interleave(x, dim=1, repeats=n_rep). The hidden states go from (batch,
+    num_key_value_heads, seqlen, head_dim) to (batch, num_attention_heads, seqlen, head_dim)
+    """
+    batch, num_key_value_heads, slen, head_dim = hidden_states.shape
+    if n_rep == 1:
+        return hidden_states
+    hidden_states = hidden_states[:, :, None, :, :].expand(batch, num_key_value_heads, n_rep, slen, head_dim)
+    return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
+
+
+def eager_attention_forward(
+    module: nn.Module,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    attention_mask: torch.Tensor | None,
+    scaling: float,
+    dropout: float = 0.0,
+    **kwargs: Unpack[TransformersKwargs],
+):
+    key_states = repeat_kv(key, module.num_key_value_groups)
+    value_states = repeat_kv(value, module.num_key_value_groups)
+    query_multi_head = query
+    key_multi_head = key_states
+    value_multi_head = value_states
+    attn_output_list = []
+    num_heads = query.shape[1]
+
+    for i in range(num_heads):
+        query = query_multi_head[:, i : i + 1, :, :]
+        key_states = key_multi_head[:, i : i + 1, :, :]
+        value_states = value_multi_head[:, i : i + 1, :, :]
+        attn_weights = torch.matmul(query, key_states.transpose(2, 3)) * scaling
+
+        if attention_mask is not None:
+            causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
+            attn_weights = attn_weights + causal_mask
+
+        attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query.dtype)
+        attn_weights = nn.functional.dropout(attn_weights, p=dropout, training=module.training)
+        attn_output = torch.matmul(attn_weights, value_states)
+        del attn_weights
+        attn_output_list.append(attn_output)
+
+    attn_output = torch.cat(attn_output_list, dim=1)
+
+    attn_output = attn_output.transpose(1, 2).contiguous()
+
+    return attn_output, None
+
+
+@use_kernelized_func(apply_rotary_pos_emb)
+class OpenPanguV2Attention(nn.Module):
+    """Multi-headed attention from 'Attention Is All You Need' paper"""
+
+    def __init__(self, config: OpenPanguV2Config, layer_idx: int):
+        super().__init__()
+        self.config = config
+        self.layer_idx = layer_idx
+        self.head_dim = getattr(config, "head_dim", config.hidden_size // config.num_attention_heads)
+        self.num_key_value_groups = config.num_attention_heads // config.num_key_value_heads
+        self.scaling = self.head_dim**-0.5
+        self.attention_dropout = config.attention_dropout
+        self.is_causal = True
+
+        self.q_proj = nn.Linear(
+            config.hidden_size, config.num_attention_heads * self.head_dim, bias=config.attention_bias
+        )
+        self.k_proj = nn.Linear(
+            config.hidden_size, config.num_key_value_heads * self.head_dim, bias=config.attention_bias
+        )
+        self.v_proj = nn.Linear(
+            config.hidden_size, config.num_key_value_heads * self.head_dim, bias=config.attention_bias
+        )
+        self.o_proj = nn.Linear(
+            config.num_attention_heads * self.head_dim, config.hidden_size, bias=config.attention_bias
+        )
+        self.layer_type = config.layer_types[layer_idx] if hasattr(config, "layer_types") else None
+        self.sliding_window = config.sliding_window if self.layer_type == "sliding_attention" else None
+        self.hidden_size = config.hidden_size
+        self.num_attention_heads = config.num_attention_heads
+        self.num_key_value_heads = config.num_key_value_heads
+        partial_rotary_factor = config.rope_parameters.get("partial_rotary_factor", 1.0)
+        self.rotary_ndims = int(self.head_dim * partial_rotary_factor)
+        self.v_head_dim = config.v_head_dim if config.v_head_dim is not None else config.head_dim
+
+        self.attn_groupnorm = config.attn_groupnorm
+        self.attn_elementwise_gate = config.attn_elementwise_gate
+        self.param_sink_number = config.param_sink_number
+        self.attn_k_layernorm = config.attn_k_layernorm
+
+        if self.param_sink_number > 0:
+            self.param_sink_key = torch.nn.Parameter(
+                torch.empty(
+                    (self.param_sink_number, self.num_key_value_heads, self.head_dim),
+                    dtype=config.torch_dtype,
+                )
+            )
+            self.param_sink_value = torch.nn.Parameter(
+                torch.empty(
+                    (self.param_sink_number, self.num_key_value_heads, self.v_head_dim),
+                    dtype=config.torch_dtype,
+                )
+            )
+
+        if self.attn_groupnorm:
+            self.groupnorm = OpenPanguV2RMSNorm(hidden_size=self.head_dim, eps=config.rms_norm_eps)
+
+        if self.attn_elementwise_gate:
+            self.attention_gate = nn.Linear(config.hidden_size, config.num_attention_heads * self.head_dim, bias=False)
+
+        if self.attn_k_layernorm:
+            self.k_layernorm = OpenPanguV2RMSNorm(hidden_size=self.head_dim, eps=config.rms_norm_eps)
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        position_embeddings: tuple[torch.Tensor, torch.Tensor],
+        attention_mask: torch.Tensor | None,
+        past_key_values: Cache | None = None,
+        # cache_position: Optional[torch.LongTensor] = None,
+        **kwargs: Unpack[TransformersKwargs],
+    ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]:
+        if self.attn_elementwise_gate:
+            gate_score = self.attention_gate(hidden_states)
+        else:
+            gate_score = None
+
+        input_shape = hidden_states.shape[:-1]
+        hidden_shape = (*input_shape, -1, self.head_dim)
+
+        query_states = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        key_states = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+
+        if self.attn_k_layernorm:
+            key_states = self.k_layernorm(key_states)
+
+        cos, sin = position_embeddings
+        # Partial rotary embedding
+        query_rot, query_pass = (
+            query_states[..., : self.rotary_ndims],
+            query_states[..., self.rotary_ndims :],
+        )
+        key_rot, key_pass = (
+            key_states[..., : self.rotary_ndims],
+            key_states[..., self.rotary_ndims :],
+        )
+        # [batch_size, seq_length, num_heads, head_dim * config.partial_rotary_factor]
+        query_rot, key_rot = apply_rotary_pos_emb(query_rot, key_rot, cos, sin)
+
+        # [batch_size, seq_length, num_heads, head_dim]
+        query_states = torch.cat((query_rot, query_pass), dim=-1)
+        key_states = torch.cat((key_rot, key_pass), dim=-1)
+
+        if past_key_values is not None:
+            # sin and cos are specific to RoPE models; cache_position needed for the static cache
+            # cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
+            key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx)
+
+        if self.param_sink_number > 0:
+            # [b, n, s, d]
+            batch_size, kv_seq_len = key_states.shape[0], key_states.shape[2]
+            param_sink_key = (
+                self.param_sink_key.permute(1, 0, 2).unsqueeze(0).expand(batch_size, -1, -1, -1).to(key_states.device)
+            )
+            param_sink_value = (
+                self.param_sink_value.permute(1, 0, 2)
+                .unsqueeze(0)
+                .expand(batch_size, -1, -1, -1)
+                .to(value_states.device)
+            )
+            key_states = torch.cat([param_sink_key, key_states], dim=2)
+            value_states = torch.cat([param_sink_value, value_states], dim=2)
+            kv_seq_len += self.param_sink_number
+
+            attention_mask = torch.nn.functional.pad(attention_mask, (self.param_sink_number, 0), value=0.0)
+
+        attention_interface: Callable = eager_attention_forward
+        if self.config._attn_implementation != "eager":
+            attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
+
+        attn_output, attn_weights = attention_interface(
+            self,
+            query_states,
+            key_states,
+            value_states,
+            attention_mask,
+            dropout=0.0 if not self.training else self.attention_dropout,
+            scaling=self.scaling,
+            sliding_window=self.sliding_window,
+            **kwargs,
+        )
+
+        if self.attn_groupnorm:
+            attn_output = self.groupnorm(attn_output)
+        if self.attn_elementwise_gate:
+            attn_output *= gate_score.sigmoid().view(attn_output.shape)
+
+        attn_output = attn_output.reshape(*input_shape, -1).contiguous()
+        attn_output = self.o_proj(attn_output)
+        return attn_output, attn_weights
+
+
 def apply_rotary_pos_emb_interleave(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
     r"""
     Applies interleaved Rotary Position Embedding to the query and key tensors.
@@ -574,47 +780,6 @@ def yarn_get_mscale(scale=1, mscale=1):
     if scale <= 1:
         return 1.0
     return 0.1 * mscale * math.log(scale) + 1.0
-
-
-def eager_attention_forward(
-    module: nn.Module,
-    query: torch.Tensor,
-    key: torch.Tensor,
-    value: torch.Tensor,
-    attention_mask: torch.Tensor | None,
-    scaling: float,
-    dropout: float = 0.0,
-    **kwargs: Unpack[TransformersKwargs],
-):
-    key_states = repeat_kv(key, module.num_key_value_groups)
-    value_states = repeat_kv(value, module.num_key_value_groups)
-    query_multi_head = query
-    key_multi_head = key_states
-    value_multi_head = value_states
-    attn_output_list = []
-    num_heads = query.shape[1]
-
-    for i in range(num_heads):
-        query = query_multi_head[:, i : i + 1, :, :]
-        key_states = key_multi_head[:, i : i + 1, :, :]
-        value_states = value_multi_head[:, i : i + 1, :, :]
-        attn_weights = torch.matmul(query, key_states.transpose(2, 3)) * scaling
-
-        if attention_mask is not None:
-            causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
-            attn_weights = attn_weights + causal_mask
-
-        attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query.dtype)
-        attn_weights = nn.functional.dropout(attn_weights, p=dropout, training=module.training)
-        attn_output = torch.matmul(attn_weights, value_states)
-        del attn_weights
-        attn_output_list.append(attn_output)
-
-    attn_output = torch.cat(attn_output_list, dim=1)
-
-    attn_output = attn_output.transpose(1, 2).contiguous()
-
-    return attn_output, None
 
 
 class OpenPanguV2MLAAttention(nn.Module):
@@ -668,17 +833,7 @@ class OpenPanguV2MLAAttention(nn.Module):
                 self.scaling = self.scaling * mscale * mscale
 
         self.layer_type = config.layer_types[layer_idx] if hasattr(config, "layer_types") else None
-        if self.layer_type == "sliding_attention":
-            self.sliding_window = config.sliding_window
-            # if hasattr(config, 'sliding_window_list') and config.sliding_window_list is not None:
-            #     # Map swa_layers index to sliding_window_list index
-            #     assert layer_idx in config.swa_layers, (f"swa layer {layer_idx} not in config.swa_layers")
-            #     swa_idx = config.swa_layers.index(layer_idx)
-            #     self.sliding_window = config.sliding_window_list[swa_idx]
-            # else:
-            #     raise ValueError("No sliding_window_list in the configuration file")
-        else:
-            self.sliding_window = None
+        self.sliding_window = config.sliding_window if self.layer_type == "sliding_attention" else None
 
         self.param_sink_number = config.param_sink_number
         if self.param_sink_number > 0:
@@ -782,7 +937,7 @@ class OpenPanguV2MLAAttention(nn.Module):
 
         if past_key_values is not None:
             # sin and cos are specific to RoPE models; cache_position needed for the static cache
-            # cache_kwargs = {"sin": sin, "cos": cos}
+            # cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
             key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx)
 
         if self.use_dsa:
@@ -982,7 +1137,10 @@ class OpenPanguV2DecoderLayer(GradientCheckpointingLayer):
         super().__init__()
         self.hidden_size = config.hidden_size
 
-        self.self_attn = OpenPanguV2MLAAttention(config=config, layer_idx=layer_idx)
+        if config.use_mla:
+            self.self_attn = OpenPanguV2MLAAttention(config=config, layer_idx=layer_idx)
+        else:
+            self.self_attn = OpenPanguV2Attention(config=config, layer_idx=layer_idx)
         self.attention_type = config.layer_types[layer_idx]
 
         if config.first_k_dense_replace > 0 and layer_idx >= config.first_k_dense_replace:
@@ -1090,86 +1248,6 @@ class OpenPanguV2DecoderLayer(GradientCheckpointingLayer):
         return hidden_states
 
 
-def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
-    """
-    This is the equivalent of torch.repeat_interleave(x, dim=1, repeats=n_rep). The hidden states go from (batch,
-    num_key_value_heads, seqlen, head_dim) to (batch, num_attention_heads, seqlen, head_dim)
-    """
-    batch, num_key_value_heads, slen, head_dim = hidden_states.shape
-    if n_rep == 1:
-        return hidden_states
-    hidden_states = hidden_states[:, :, None, :, :].expand(batch, num_key_value_heads, n_rep, slen, head_dim)
-    return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
-
-
-@use_kernelized_func(apply_rotary_pos_emb)
-class OpenPanguV2Attention(nn.Module):
-    """Multi-headed attention from 'Attention Is All You Need' paper"""
-
-    def __init__(self, config: OpenPanguV2Config, layer_idx: int):
-        super().__init__()
-        self.config = config
-        self.layer_idx = layer_idx
-        self.head_dim = getattr(config, "head_dim", config.hidden_size // config.num_attention_heads)
-        self.num_key_value_groups = config.num_attention_heads // config.num_key_value_heads
-        self.scaling = self.head_dim**-0.5
-        self.attention_dropout = config.attention_dropout
-        self.is_causal = True
-
-        self.q_proj = nn.Linear(
-            config.hidden_size, config.num_attention_heads * self.head_dim, bias=config.attention_bias
-        )
-        self.k_proj = nn.Linear(
-            config.hidden_size, config.num_key_value_heads * self.head_dim, bias=config.attention_bias
-        )
-        self.v_proj = nn.Linear(
-            config.hidden_size, config.num_key_value_heads * self.head_dim, bias=config.attention_bias
-        )
-        self.o_proj = nn.Linear(
-            config.num_attention_heads * self.head_dim, config.hidden_size, bias=config.attention_bias
-        )
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = None,
-        attention_mask: torch.Tensor | None = None,
-        past_key_values: Cache | None = None,
-        **kwargs: Unpack[TransformersKwargs],
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        input_shape = hidden_states.shape[:-1]
-        hidden_shape = (*input_shape, -1, self.head_dim)
-
-        query_states = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
-        key_states = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
-        value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
-
-        cos, sin = position_embeddings
-        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
-
-        if past_key_values is not None:
-            key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx)
-
-        attention_interface: Callable = ALL_ATTENTION_FUNCTIONS.get_interface(
-            self.config._attn_implementation, eager_attention_forward
-        )
-
-        attn_output, attn_weights = attention_interface(
-            self,
-            query_states,
-            key_states,
-            value_states,
-            attention_mask,
-            dropout=0.0 if not self.training else self.attention_dropout,
-            scaling=self.scaling,
-            **kwargs,
-        )
-
-        attn_output = attn_output.reshape(*input_shape, -1).contiguous()
-        attn_output = self.o_proj(attn_output)
-        return attn_output, attn_weights
-
-
 @auto_docstring
 class OpenPanguV2PreTrainedModel(PreTrainedModel):
     config: OpenPanguV2Config
@@ -1238,10 +1316,10 @@ class OpenPanguV2Model(OpenPanguV2PreTrainedModel):
             past_key_values = DynamicCache(config=self.config)
 
         # if cache_position is None:
-        # past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
-        # cache_position = torch.arange(
-        #     past_seen_tokens, past_seen_tokens + inputs_embeds.shape[1], device=inputs_embeds.device
-        # )
+        #     past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
+        #     cache_position = torch.arange(
+        #         past_seen_tokens, past_seen_tokens + inputs_embeds.shape[1], device=inputs_embeds.device
+        #     )
 
         if position_ids is None:
             past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0

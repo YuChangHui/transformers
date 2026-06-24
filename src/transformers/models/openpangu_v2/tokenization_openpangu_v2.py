@@ -12,7 +12,7 @@ logger = logging.get_logger(__name__)
 
 VOCAB_FILES_NAMES = {"tokenizer_file": "tokenizer.json"}
 
-PRETOKENIZE_REGEX = r"'(?i:[sdmt]|ll|ve|re)| (?=\p{Han}|[＂＃＄％＆＇（）＊＋，－／：；＜＝＞＠［＼］＾＿｀｛｜｝～｟｠｢｣､　、〃〈〉《》「」『』【】〔〕〖〗〘〙〚〛〜〝〞〟〰〾〿–—‘’‛“”„‟…‧﹏﹑﹔·．！？｡。])|[＂＃＄％＆＇（）＊＋，－／：；＜＝＞＠［＼］＾＿｀｛｜｝～｟｠｢｣､　、〃〈〉《》「」『』【】〔〕〖〗〘〙〚〛〜〝〞〟〰〾〿–—‘’‛“”„‟…‧﹏﹑﹔·．！？｡。]+[\r\n]*|[^\r\n\p{L}\p{N}]?+[\p{L}\p{M}]+|\p{N}| ?[^\s\p{L}\p{N}]++[\r\n]*|\s*[\r\n]|\s+(?!\S)|\s+"
+PRETOKENIZE_REGEX = r"'(?i:[sdmt]|ll|ve|re)| (?=\p{Han}|[＂＃＄％＆＇（）＊＋，－／：；＜＝＞＠［＼］＾＿｀｛｜｝～｟｠｢｣､　、〃〈〉《》「」『』【】〔〕〖〗〘〙〚〛〜〝〞〟〰〾〿–—‘’‛“”„‟…‧﹏﹑﹔·．！？｡。])|[＂＃＄％＆＇（）＊＋，－／：；＜＝＞＠［＼］＾＿｀｛｜｝～｟｠｢｣､　、〃〈〉《》「」『』【】〔〕〖〗〘〙〚〛〜〝〞〟〰〾〿–—‘’‛“”„‟…‧﹏﹑﹔·．！？｡。]+[\r\n]*|[^\r\n\p{L}\p{N}]?+[\p{L}\p{M}]+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]++[\r\n]*|\s*[\r\n]|\s+(?!\S)|\s+"
 
 class OpenPanguV2Tokenizer(TokenizersBackend):
     vocab_files_names = VOCAB_FILES_NAMES
@@ -27,7 +27,7 @@ class OpenPanguV2Tokenizer(TokenizersBackend):
         tokenizer_file: Optional[str] = None,
         bos_token: str = "<|pangu_text_start|>",
         eos_token: str = "<|pangu_text_end|>",
-        unk_token: str = None,
+        unk_token: str = "<unk>",
         add_bos_token: bool = True,
         add_eos_token: bool = False,
         add_prefix_space: bool = False,
