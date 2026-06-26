@@ -18,7 +18,7 @@ from transformers.configuration_utils import PreTrainedConfig
 from transformers.utils import logging
 
 try:
-    # transformers >= 5.0 exports RopeParameters as a TypedDict
+    # transformers >= 5.0 exports RopeParameters as a TypedDict.
     from transformers.modeling_rope_utils import RopeParameters
 except ImportError:
     # transformers < 5.0 has no RopeParameters. Provide a TypedDict with the
@@ -101,7 +101,6 @@ class OpenPanguV2Config(PreTrainedConfig):
         swa_layers: list[str] | None = None,
         layer_types: list[str] | None = None,
         attention_dropout: float | None = 0.0,
-        pad_token_id: int | None = 0,
         param_sink_number: int | None = 0,
         router_sliding_window: int | None = 0,
         sandwich_norm: bool | None = False,
@@ -153,7 +152,6 @@ class OpenPanguV2Config(PreTrainedConfig):
         self.norm_topk_prob = norm_topk_prob
         self.rope_interleave = rope_interleave
 
-        self.pad_token_id = pad_token_id
         self.sliding_window = sliding_window
         self.swa_layers = swa_layers
 
