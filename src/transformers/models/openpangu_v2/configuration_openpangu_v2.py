@@ -87,7 +87,6 @@ class OpenPanguV2Config(PreTrainedConfig):
         q_lora_rank: int | None = None,
         qk_rope_head_dim: int | None = None,
         qk_nope_head_dim: int | None = None,
-        topk_group: int | None = 1,
         num_experts_per_tok: int | None = None,
         first_k_dense_replace: int | None = 0,
         norm_topk_prob: bool | None = None,
@@ -146,7 +145,6 @@ class OpenPanguV2Config(PreTrainedConfig):
         if qk_rope_head_dim is not None and qk_nope_head_dim is not None:
             self.head_dim = qk_rope_head_dim
             self.qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
-        self.topk_group = topk_group
         self.num_experts_per_tok = num_experts_per_tok
         self.first_k_dense_replace = first_k_dense_replace
         self.norm_topk_prob = norm_topk_prob

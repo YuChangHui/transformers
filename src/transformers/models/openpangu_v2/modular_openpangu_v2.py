@@ -726,7 +726,7 @@ class OpenPanguV2SparseMoeBlock(DeepseekV3MoE):
         )
         self.n_routed_experts = config.n_routed_experts
         self.n_group = 1
-        self.topk_group = config.topk_group
+        self.topk_group = 1
         self.norm_topk_prob = config.norm_topk_prob
         self.routed_scaling_factor = config.routed_scaling_factor
         self.top_k = config.num_experts_per_tok
