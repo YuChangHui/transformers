@@ -498,10 +498,7 @@ class OpenPanguV2Attention(LlamaAttention):
         self.rotary_ndims = int(self.head_dim * partial_rotary_factor)
         self.v_head_dim = config.v_head_dim if config.v_head_dim is not None else config.head_dim
 
-        self.attn_groupnorm = config.attn_groupnorm
-        self.attn_elementwise_gate = config.attn_elementwise_gate
         self.param_sink_number = config.param_sink_number
-        self.attn_k_layernorm  = config.attn_k_layernorm
 
         if self.param_sink_number > 0:
             self.param_sink_key = torch.nn.Parameter(
@@ -517,15 +514,6 @@ class OpenPanguV2Attention(LlamaAttention):
                 )
             )
         
-        if self.attn_groupnorm:
-            self.groupnorm = OpenPanguV2RMSNorm(hidden_size=self.head_dim, eps=config.rms_norm_eps)
-        
-        if self.attn_elementwise_gate:
-            self.attention_gate = nn.Linear(config.hidden_size, config.num_attention_heads * self.head_dim, bias=False)
-
-        if self.attn_k_layernorm:
-            self.k_layernorm = OpenPanguV2RMSNorm(hidden_size=self.head_dim, eps=config.rms_norm_eps)
-        
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -535,10 +523,7 @@ class OpenPanguV2Attention(LlamaAttention):
         # cache_position: Optional[torch.LongTensor] = None,
         **kwargs: Unpack[TransformersKwargs],
     ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[tuple[torch.Tensor]]]:
-        if self.attn_elementwise_gate:
-            gate_score = self.attention_gate(hidden_states)
-        else:
-            gate_score = None
+        gate_score = None
 
         input_shape = hidden_states.shape[:-1]
         hidden_shape = (*input_shape, -1, self.head_dim)
@@ -546,9 +531,6 @@ class OpenPanguV2Attention(LlamaAttention):
         query_states = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
         key_states = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
         value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
-
-        if self.attn_k_layernorm:
-            key_states = self.k_layernorm(key_states)
         
         cos, sin = position_embeddings
         # Partial rotary embedding
@@ -597,12 +579,7 @@ class OpenPanguV2Attention(LlamaAttention):
             scaling=self.scaling,
             sliding_window=self.sliding_window,
             **kwargs,
-        )
-
-        if self.attn_groupnorm:
-            attn_output = self.groupnorm(attn_output)
-        if self.attn_elementwise_gate:
-            attn_output *= gate_score.sigmoid().view(attn_output.shape)    
+        )  
 
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
         attn_output = self.o_proj(attn_output)
@@ -629,14 +606,14 @@ class OpenPanguV2MLAAttention(nn.Module):
         if self.q_lora_rank is None:
             self.q_proj = nn.Linear(config.hidden_size, self.num_heads * self.qk_head_dim, bias=False)
         else:
-            self.q_a_proj = nn.Linear(config.hidden_size, config.q_lora_rank, bias=config.attention_bias)
+            self.q_a_proj = nn.Linear(config.hidden_size, config.q_lora_rank, bias=False)
             self.q_a_layernorm = OpenPanguV2RMSNorm(config.q_lora_rank)
             self.q_b_proj = nn.Linear(config.q_lora_rank, self.num_heads * self.qk_head_dim, bias=False)
 
         self.kv_a_proj_with_mqa = nn.Linear(
             config.hidden_size,
             self.kv_lora_rank + self.qk_rope_head_dim,
-            bias=config.attention_bias,
+            bias=False,
         )
         self.kv_a_layernorm = OpenPanguV2RMSNorm(self.kv_lora_rank)
         self.kv_b_proj = nn.Linear(
@@ -648,7 +625,7 @@ class OpenPanguV2MLAAttention(nn.Module):
         self.o_proj = nn.Linear(
             self.num_heads * self.v_head_dim,
             config.hidden_size,
-            bias=config.attention_bias,
+            bias=False,
         )
 
         self.scaling = self.qk_head_dim ** (-0.5)
