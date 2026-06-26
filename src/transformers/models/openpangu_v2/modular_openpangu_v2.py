@@ -28,12 +28,11 @@ from torch.nn import functional as F
 
 from transformers.cache_utils import Cache
 from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
-from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
+from transformers.modeling_outputs import BaseModelOutputWithPast
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 from transformers.processing_utils import Unpack
 from transformers.utils import logging
 from transformers.models.llama.modeling_llama import (
-    LlamaAttention,
     LlamaDecoderLayer,
     LlamaForCausalLM,
     LlamaPreTrainedModel,
@@ -41,26 +40,20 @@ from transformers.models.llama.modeling_llama import (
     LlamaModel,
     apply_rotary_pos_emb,
     eager_attention_forward,
+    repeat_kv
 )
 from transformers.models.deepseek_v3.modeling_deepseek_v3 import (
-    DeepseekV3TopkRouter,
     DeepseekV3MoE,
-    DeepseekV3Attention,
     apply_rotary_pos_emb_interleave,
     yarn_get_mscale,
 )
 from transformers.models.mixtral.modeling_mixtral import MixtralExperts
 from transformers.models.phi.modeling_phi import PhiRotaryEmbedding
-from transformers.models.qwen2_moe.modeling_qwen2_moe import (
-    Qwen2MoeExperts,
-    Qwen2MoeTopKRouter,
-    Qwen2MoeSparseMoeBlock, 
-)
 
 from ...cache_utils import Cache, DynamicCache
 from ...integrations import use_kernel_forward_from_hub
 from ...masking_utils import create_causal_mask, create_sliding_window_causal_mask
-from ...utils import TransformersKwargs, auto_docstring, can_return_tuple, logging
+from ...utils import TransformersKwargs, auto_docstring, logging
 from ...utils.import_utils import get_torch_version
 from ...utils.generic import check_model_inputs
 from .configuration_openpangu_v2 import OpenPanguV2Config
@@ -472,7 +465,7 @@ class OpenPanguV2MLP(LlamaMLP):
         self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=False)
 
 
-class OpenPanguV2MLAAttention(nn.Module):
+class OpenPanguV2Attention(nn.Module):
     def __init__(self, config: OpenPanguV2Config, layer_idx: int):
         super().__init__()
         self.config = config
@@ -578,7 +571,6 @@ class OpenPanguV2MLAAttention(nn.Module):
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
         attention_mask: torch.Tensor | None,
         past_key_values: Cache | None = None,
-        # cache_position: torch.LongTensor | None = None,
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]:
         batch_size, seq_length = hidden_states.shape[:-1]
@@ -624,8 +616,6 @@ class OpenPanguV2MLAAttention(nn.Module):
         key_states = torch.cat((k_pass, k_rot), dim=-1)
 
         if past_key_values is not None:
-            # sin and cos are specific to RoPE models; cache_position needed for the static cache
-            # cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
             key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx)
 
         if self.use_dsa:
@@ -773,7 +763,7 @@ class OpenPanguV2DecoderLayer(LlamaDecoderLayer):
         nn.Module.__init__(self)
         self.hidden_size = config.hidden_size
 
-        self.self_attn = OpenPanguV2MLAAttention(config=config, layer_idx=layer_idx)
+        self.self_attn = OpenPanguV2Attention(config=config, layer_idx=layer_idx)
         self.attention_type = config.layer_types[layer_idx]
 
         if config.first_k_dense_replace > 0 and layer_idx >= config.first_k_dense_replace:
@@ -824,7 +814,6 @@ class OpenPanguV2DecoderLayer(LlamaDecoderLayer):
         position_ids: Optional[torch.LongTensor] = None,
         past_key_values: Optional[Cache] = None,
         use_cache: Optional[bool] = False,
-        # cache_position: Optional[torch.LongTensor] = None,
         position_embeddings: Optional[tuple[torch.Tensor, torch.Tensor]] = None,  # necessary, but kept here for BC
         **kwargs: Unpack[TransformersKwargs],
     ) -> torch.Tensor:
@@ -841,7 +830,6 @@ class OpenPanguV2DecoderLayer(LlamaDecoderLayer):
             position_ids=position_ids,
             past_key_values=past_key_values,
             use_cache=use_cache,
-            # cache_position=cache_position,
             position_embeddings=position_embeddings,
             **kwargs,
         )
@@ -907,7 +895,6 @@ class OpenPanguV2Model(LlamaModel):
         past_key_values: Cache | None = None,
         inputs_embeds: torch.FloatTensor | None = None,
         use_cache: bool | None = None,
-        # cache_position: torch.LongTensor | None = None,
         **kwargs: Unpack[TransformersKwargs],
     ) -> BaseModelOutputWithPast:
         if (input_ids is None) ^ (inputs_embeds is not None):
@@ -918,12 +905,6 @@ class OpenPanguV2Model(LlamaModel):
 
         if use_cache and past_key_values is None:
             past_key_values = DynamicCache(config=self.config)
-
-        # if cache_position is None:
-        #     past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
-        #     cache_position = torch.arange(
-        #         past_seen_tokens, past_seen_tokens + inputs_embeds.shape[1], device=inputs_embeds.device
-        #     )
 
         if position_ids is None:
             past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
@@ -937,7 +918,6 @@ class OpenPanguV2Model(LlamaModel):
                 "config": self.config,
                 "inputs_embeds": inputs_embeds,
                 "attention_mask": attention_mask,
-                # "cache_position": cache_position,
                 "past_key_values": past_key_values,
                 "position_ids": position_ids,
             }
@@ -963,7 +943,6 @@ class OpenPanguV2Model(LlamaModel):
                 position_ids=position_ids,
                 past_key_values=past_key_values,
                 use_cache=use_cache,
-                # cache_position=cache_position,
                 **kwargs,
             )
 
