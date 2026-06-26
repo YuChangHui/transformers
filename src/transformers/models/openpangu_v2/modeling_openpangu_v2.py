@@ -35,21 +35,17 @@ from torch.nn import functional as F
 
 from transformers.cache_utils import Cache
 from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
-from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
+from transformers.modeling_outputs import BaseModelOutputWithPast
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 from transformers.processing_utils import Unpack
 
 from ...activations import ACT2FN
 from ...cache_utils import DynamicCache
 from ...generation import GenerationMixin
-from ...integrations import (
-    use_experts_implementation,
-    use_kernel_forward_from_hub,
-    use_kernel_func_from_hub,
-    use_kernelized_func,
-)
+from ...integrations import use_experts_implementation, use_kernel_forward_from_hub, use_kernel_func_from_hub
 from ...masking_utils import create_causal_mask, create_sliding_window_causal_mask
 from ...modeling_layers import GradientCheckpointingLayer
+from ...modeling_outputs import CausalLMOutputWithPast
 from ...modeling_rope_utils import ROPE_INIT_FUNCTIONS, dynamic_rope_update
 from ...modeling_utils import PreTrainedModel
 from ...utils import TransformersKwargs, auto_docstring, can_return_tuple
@@ -514,6 +510,18 @@ class OpenPanguV2MLP(nn.Module):
         return down_proj
 
 
+def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
+    """
+    This is the equivalent of torch.repeat_interleave(x, dim=1, repeats=n_rep). The hidden states go from (batch,
+    num_key_value_heads, seqlen, head_dim) to (batch, num_attention_heads, seqlen, head_dim)
+    """
+    batch, num_key_value_heads, slen, head_dim = hidden_states.shape
+    if n_rep == 1:
+        return hidden_states
+    hidden_states = hidden_states[:, :, None, :, :].expand(batch, num_key_value_heads, n_rep, slen, head_dim)
+    return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
+
+
 def apply_rotary_pos_emb_interleave(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
     r"""
     Applies interleaved Rotary Position Embedding to the query and key tensors.
@@ -600,7 +608,7 @@ def eager_attention_forward(
     return attn_output, None
 
 
-class OpenPanguV2MLAAttention(nn.Module):
+class OpenPanguV2Attention(nn.Module):
     def __init__(self, config: OpenPanguV2Config, layer_idx: int):
         super().__init__()
         self.config = config
@@ -706,7 +714,6 @@ class OpenPanguV2MLAAttention(nn.Module):
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
         attention_mask: torch.Tensor | None,
         past_key_values: Cache | None = None,
-        # cache_position: torch.LongTensor | None = None,
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]:
         batch_size, seq_length = hidden_states.shape[:-1]
@@ -754,8 +761,6 @@ class OpenPanguV2MLAAttention(nn.Module):
         key_states = torch.cat((k_pass, k_rot), dim=-1)
 
         if past_key_values is not None:
-            # sin and cos are specific to RoPE models; cache_position needed for the static cache
-            # cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
             key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx)
 
         if self.use_dsa:
@@ -955,7 +960,7 @@ class OpenPanguV2DecoderLayer(GradientCheckpointingLayer):
         super().__init__()
         self.hidden_size = config.hidden_size
 
-        self.self_attn = OpenPanguV2MLAAttention(config=config, layer_idx=layer_idx)
+        self.self_attn = OpenPanguV2Attention(config=config, layer_idx=layer_idx)
         self.attention_type = config.layer_types[layer_idx]
 
         if config.first_k_dense_replace > 0 and layer_idx >= config.first_k_dense_replace:
@@ -1004,7 +1009,6 @@ class OpenPanguV2DecoderLayer(GradientCheckpointingLayer):
         position_ids: torch.LongTensor | None = None,
         past_key_values: Cache | None = None,
         use_cache: bool | None = False,
-        # cache_position: Optional[torch.LongTensor] = None,
         position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = None,  # necessary, but kept here for BC
         **kwargs: Unpack[TransformersKwargs],
     ) -> torch.Tensor:
@@ -1021,7 +1025,6 @@ class OpenPanguV2DecoderLayer(GradientCheckpointingLayer):
             position_ids=position_ids,
             past_key_values=past_key_values,
             use_cache=use_cache,
-            # cache_position=cache_position,
             position_embeddings=position_embeddings,
             **kwargs,
         )
@@ -1059,86 +1062,6 @@ class OpenPanguV2DecoderLayer(GradientCheckpointingLayer):
         if self.has_block_post_layernorm:
             hidden_states = self.block_post_layernorm(hidden_states)
         return hidden_states
-
-
-def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
-    """
-    This is the equivalent of torch.repeat_interleave(x, dim=1, repeats=n_rep). The hidden states go from (batch,
-    num_key_value_heads, seqlen, head_dim) to (batch, num_attention_heads, seqlen, head_dim)
-    """
-    batch, num_key_value_heads, slen, head_dim = hidden_states.shape
-    if n_rep == 1:
-        return hidden_states
-    hidden_states = hidden_states[:, :, None, :, :].expand(batch, num_key_value_heads, n_rep, slen, head_dim)
-    return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
-
-
-@use_kernelized_func(apply_rotary_pos_emb)
-class OpenPanguV2Attention(nn.Module):
-    """Multi-headed attention from 'Attention Is All You Need' paper"""
-
-    def __init__(self, config: OpenPanguV2Config, layer_idx: int):
-        super().__init__()
-        self.config = config
-        self.layer_idx = layer_idx
-        self.head_dim = getattr(config, "head_dim", config.hidden_size // config.num_attention_heads)
-        self.num_key_value_groups = config.num_attention_heads // config.num_key_value_heads
-        self.scaling = self.head_dim**-0.5
-        self.attention_dropout = config.attention_dropout
-        self.is_causal = True
-
-        self.q_proj = nn.Linear(
-            config.hidden_size, config.num_attention_heads * self.head_dim, bias=config.attention_bias
-        )
-        self.k_proj = nn.Linear(
-            config.hidden_size, config.num_key_value_heads * self.head_dim, bias=config.attention_bias
-        )
-        self.v_proj = nn.Linear(
-            config.hidden_size, config.num_key_value_heads * self.head_dim, bias=config.attention_bias
-        )
-        self.o_proj = nn.Linear(
-            config.num_attention_heads * self.head_dim, config.hidden_size, bias=config.attention_bias
-        )
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = None,
-        attention_mask: torch.Tensor | None = None,
-        past_key_values: Cache | None = None,
-        **kwargs: Unpack[TransformersKwargs],
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        input_shape = hidden_states.shape[:-1]
-        hidden_shape = (*input_shape, -1, self.head_dim)
-
-        query_states = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
-        key_states = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
-        value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
-
-        cos, sin = position_embeddings
-        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
-
-        if past_key_values is not None:
-            key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx)
-
-        attention_interface: Callable = ALL_ATTENTION_FUNCTIONS.get_interface(
-            self.config._attn_implementation, eager_attention_forward
-        )
-
-        attn_output, attn_weights = attention_interface(
-            self,
-            query_states,
-            key_states,
-            value_states,
-            attention_mask,
-            dropout=0.0 if not self.training else self.attention_dropout,
-            scaling=self.scaling,
-            **kwargs,
-        )
-
-        attn_output = attn_output.reshape(*input_shape, -1).contiguous()
-        attn_output = self.o_proj(attn_output)
-        return attn_output, attn_weights
 
 
 @auto_docstring
@@ -1196,7 +1119,6 @@ class OpenPanguV2Model(OpenPanguV2PreTrainedModel):
         past_key_values: Cache | None = None,
         inputs_embeds: torch.FloatTensor | None = None,
         use_cache: bool | None = None,
-        # cache_position: torch.LongTensor | None = None,
         **kwargs: Unpack[TransformersKwargs],
     ) -> BaseModelOutputWithPast:
         if (input_ids is None) ^ (inputs_embeds is not None):
@@ -1207,12 +1129,6 @@ class OpenPanguV2Model(OpenPanguV2PreTrainedModel):
 
         if use_cache and past_key_values is None:
             past_key_values = DynamicCache(config=self.config)
-
-        # if cache_position is None:
-        #     past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
-        #     cache_position = torch.arange(
-        #         past_seen_tokens, past_seen_tokens + inputs_embeds.shape[1], device=inputs_embeds.device
-        #     )
 
         if position_ids is None:
             past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
@@ -1226,7 +1142,6 @@ class OpenPanguV2Model(OpenPanguV2PreTrainedModel):
                 "config": self.config,
                 "inputs_embeds": inputs_embeds,
                 "attention_mask": attention_mask,
-                # "cache_position": cache_position,
                 "past_key_values": past_key_values,
                 "position_ids": position_ids,
             }
@@ -1252,7 +1167,6 @@ class OpenPanguV2Model(OpenPanguV2PreTrainedModel):
                 position_ids=position_ids,
                 past_key_values=past_key_values,
                 use_cache=use_cache,
-                # cache_position=cache_position,
                 **kwargs,
             )
 
