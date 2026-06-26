@@ -57,7 +57,6 @@ class OpenPanguV2Config(PreTrainedConfig):
         num_key_value_heads: int | None = None,
         head_dim: int | None = None,
         v_head_dim: int | None = None,
-        use_mla: bool | None = False,
         n_shared_experts: int | None = None,
         n_routed_experts: int | None = None,
         routed_scaling_factor: float | None = None,
@@ -91,7 +90,6 @@ class OpenPanguV2Config(PreTrainedConfig):
         mhc_use_gamma: bool | None = None,
         mhc_recur_norm: int | None = None,
         mhc_num_stream: int | None = None,
-        vanilla_mlp: bool | None = False,
         dsa_layers: list[str] | None = None,
         index_topk: int | None = None,
         index_head_dim: int | None = None,
@@ -118,7 +116,6 @@ class OpenPanguV2Config(PreTrainedConfig):
         self.attention_dropout = attention_dropout
         self.layer_types = layer_types
 
-        self.use_mla = use_mla
         self.n_shared_experts = n_shared_experts
         self.n_routed_experts = n_routed_experts
         self.routed_scaling_factor = routed_scaling_factor
@@ -151,7 +148,6 @@ class OpenPanguV2Config(PreTrainedConfig):
         self.mhc_use_gamma = mhc_use_gamma
         self.mhc_recur_norm = mhc_recur_norm
         self.mhc_num_stream = mhc_num_stream
-        self.vanilla_mlp = vanilla_mlp
         
         # Indexer (DSA) parameters
         self.dsa_layers = dsa_layers
