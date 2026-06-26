@@ -15,8 +15,31 @@
 """ OpenPangu_v2 model configuration"""
 
 from transformers.configuration_utils import PreTrainedConfig
-from transformers.modeling_rope_utils import RopeParameters
 from transformers.utils import logging
+
+try:
+    # transformers >= 5.0 exports RopeParameters as a TypedDict
+    from transformers.modeling_rope_utils import RopeParameters
+except ImportError:
+    # transformers < 5.0 has no RopeParameters. Provide a TypedDict with the
+    # same fields so the `rope_parameters` annotation still resolves. It is
+    # only used for typing -- `rope_parameters` defaults to None and is not
+    # exercised by config.json, so this fallback never affects behavior.
+    from typing import TypedDict
+
+    class RopeParameters(TypedDict, total=False):
+        rope_theta: float
+        rope_type: str | None
+        partial_rotary_factor: float | None
+        factor: float | None
+        original_max_position_embeddings: int | None
+        attention_factor: float | None
+        beta_fast: float | None
+        beta_slow: float | None
+        short_factor: list[float] | None
+        long_factor: list[float] | None
+        low_freq_factor: float | None
+        high_freq_factor: float | None
 
 logger = logging.get_logger(__name__)
 
@@ -72,7 +95,6 @@ class OpenPanguV2Config(PreTrainedConfig):
         max_position_embeddings: int | None = None,
         rms_norm_eps: float | None = 1e-5,
         use_cache: bool | None = True,
-        tie_word_embeddings: bool | None = False,
         rope_parameters: RopeParameters | dict[str, RopeParameters] | None = None,
         rope_interleave: bool | None = False,
         sliding_window: int | list[int] | None = None,
@@ -80,8 +102,6 @@ class OpenPanguV2Config(PreTrainedConfig):
         layer_types: list[str] | None = None,
         attention_dropout: float | None = 0.0,
         pad_token_id: int | None = 0,
-        bos_token_id: int | None = 1,
-        eos_token_id: int | None = 2,
         param_sink_number: int | None = 0,
         router_sliding_window: int | None = 0,
         sandwich_norm: bool | None = False,
@@ -134,11 +154,8 @@ class OpenPanguV2Config(PreTrainedConfig):
         self.rope_interleave = rope_interleave
 
         self.pad_token_id = pad_token_id
-        self.bos_token_id = bos_token_id
-        self.eos_token_id = eos_token_id
         self.sliding_window = sliding_window
         self.swa_layers = swa_layers
-        self.tie_word_embeddings = tie_word_embeddings
 
         self.param_sink_number = param_sink_number
         self.router_sliding_window = router_sliding_window
