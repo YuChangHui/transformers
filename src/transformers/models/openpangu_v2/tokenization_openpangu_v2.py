@@ -2,7 +2,7 @@
 import json
 from typing import Any, Dict, Optional, Tuple, List
 
-from tokenizers import Regex, Tokenizer, decoders, normalizers, pre_tokenizers, processors
+from tokenizers import Regex, Tokenizer, decoders, pre_tokenizers, processors
 from tokenizers.models import BPE
 
 from transformers.tokenization_utils_tokenizers import TokenizersBackend
@@ -33,36 +33,34 @@ class OpenPanguV2Tokenizer(TokenizersBackend):
         add_prefix_space: bool = False,
         **kwargs,
     ):
-        print("[YCHDEBUG] init OpenPanguV2Tokenizer", flush=True)
-        
         self._vocab = vocab or {}
         self._merges = merges or []
         self._add_bos_token = add_bos_token
         self._add_eos_token = add_eos_token
 
-        self._tokenizer = Tokenizer(
-            BPE(
-                vocab=self._vocab,
-                merges=self._merges,
-                dropout=None,
-                unk_token=unk_token,
-                byte_fallback=True,
+        if tokenizer_file is not None and vocab is None and merges is None:
+            self._tokenizer = Tokenizer.from_file(tokenizer_file)
+        else:
+            self._tokenizer = Tokenizer(
+                BPE(
+                    vocab=self._vocab,
+                    merges=self._merges,
+                    dropout=None,
+                    unk_token=unk_token,
+                    byte_fallback=True,
+                )
             )
-        )
-
-
-        self._tokenizer.pre_tokenizer = pre_tokenizers.Sequence([
-            pre_tokenizers.Split(
-                Regex(PRETOKENIZE_REGEX),
-                behavior="isolated",
-            ),
-            pre_tokenizers.ByteLevel(
-                add_prefix_space=add_prefix_space,
-                use_regex=False,
-            ),
-        ])
-
-        self._tokenizer.decoder = decoders.ByteLevel()
+            self._tokenizer.pre_tokenizer = pre_tokenizers.Sequence([
+                pre_tokenizers.Split(
+                    Regex(PRETOKENIZE_REGEX),
+                    behavior="isolated",
+                ),
+                pre_tokenizers.ByteLevel(
+                    add_prefix_space=add_prefix_space,
+                    use_regex=False,
+                ),
+            ])
+            self._tokenizer.decoder = decoders.ByteLevel()
 
         super().__init__(
             bos_token=bos_token,
@@ -78,8 +76,13 @@ class OpenPanguV2Tokenizer(TokenizersBackend):
     def update_post_processor(self):
         bos = self.bos_token
         bos_id = self.bos_token_id
+        if bos is None and self.add_bos_token:
+            raise ValueError("add_bos_token = True but bos_token = None")
+
         eos = self.eos_token
         eos_id = self.eos_token_id
+        if eos is None and self.add_eos_token:
+            raise ValueError("add_eos_token = True but eos_token = None")
 
         single = f"{bos}:0 $A:0" if self._add_bos_token else "$A:0"
         if self._add_eos_token:
@@ -114,5 +117,9 @@ class OpenPanguV2Tokenizer(TokenizersBackend):
     def add_eos_token(self, value):
         self._add_eos_token = value
         self.update_post_processor()
+
+    @property
+    def vocab_size(self):
+        return self._tokenizer.get_vocab_size(with_added_tokens=True)
 
 __all__ = ["OpenPanguV2Tokenizer"]

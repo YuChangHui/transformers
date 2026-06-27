@@ -15,31 +15,9 @@
 """ OpenPangu_v2 model configuration"""
 
 from transformers.configuration_utils import PreTrainedConfig
+from transformers.modeling_rope_utils import RopeParameters
 from transformers.utils import logging
 
-try:
-    # transformers >= 5.0 exports RopeParameters as a TypedDict.
-    from transformers.modeling_rope_utils import RopeParameters
-except ImportError:
-    # transformers < 5.0 has no RopeParameters. Provide a TypedDict with the
-    # same fields so the `rope_parameters` annotation still resolves. It is
-    # only used for typing -- `rope_parameters` defaults to None and is not
-    # exercised by config.json, so this fallback never affects behavior.
-    from typing import TypedDict
-
-    class RopeParameters(TypedDict, total=False):
-        rope_theta: float
-        rope_type: str | None
-        partial_rotary_factor: float | None
-        factor: float | None
-        original_max_position_embeddings: int | None
-        attention_factor: float | None
-        beta_fast: float | None
-        beta_slow: float | None
-        short_factor: list[float] | None
-        long_factor: list[float] | None
-        low_freq_factor: float | None
-        high_freq_factor: float | None
 
 logger = logging.get_logger(__name__)
 
@@ -71,47 +49,47 @@ class OpenPanguV2Config(PreTrainedConfig):
 
     def __init__(
         self,
-        vocab_size: int | None = None,
-        hidden_size: int | None = None,
-        intermediate_size: int | None = None,
-        moe_intermediate_size: int | None = None,
-        num_hidden_layers: int | None = 0,
-        num_attention_heads: int | None = None,
-        num_key_value_heads: int | None = None,
-        head_dim: int | None = None,
-        v_head_dim: int | None = None,
-        n_shared_experts: int | None = None,
-        n_routed_experts: int | None = None,
-        routed_scaling_factor: float | None = None,
-        kv_lora_rank: int | None = None,
-        q_lora_rank: int | None = None,
-        qk_rope_head_dim: int | None = None,
-        qk_nope_head_dim: int | None = None,
-        num_experts_per_tok: int | None = None,
-        first_k_dense_replace: int | None = 0,
-        norm_topk_prob: bool | None = None,
-        hidden_act: str | None = "silu",
-        max_position_embeddings: int | None = None,
-        rms_norm_eps: float | None = 1e-5,
-        use_cache: bool | None = True,
-        rope_parameters: RopeParameters | dict[str, RopeParameters] | None = None,
-        rope_interleave: bool | None = False,
-        sliding_window: int | list[int] | None = None,
-        swa_layers: list[str] | None = None,
-        layer_types: list[str] | None = None,
         attention_dropout: float | None = 0.0,
-        param_sink_number: int | None = 0,
-        router_sliding_window: int | None = 0,
-        sandwich_norm: bool | None = False,
         block_post_layernorm_idx: list[int] | None = None,
-        use_mhc: bool | None = False,
-        mhc_use_gamma: bool | None = None,
-        mhc_recur_norm: int | None = None,
-        mhc_num_stream: int | None = None,
         dsa_layers: list[str] | None = None,
-        index_topk: int | None = None,
+        first_k_dense_replace: int | None = 0,
+        head_dim: int | None = None,
+        hidden_act: str | None = "silu",
+        hidden_size: int | None = None,
         index_head_dim: int | None = None,
         index_n_heads: int | None = None,
+        index_topk: int | None = None,
+        intermediate_size: int | None = None,
+        kv_lora_rank: int | None = None,
+        layer_types: list[str] | None = None,
+        max_position_embeddings: int | None = None,
+        mhc_num_stream: int | None = None,
+        mhc_recur_norm: int | None = None,
+        mhc_use_gamma: bool | None = None,
+        moe_intermediate_size: int | None = None,
+        n_routed_experts: int | None = None,
+        n_shared_experts: int | None = None,
+        norm_topk_prob: bool | None = None,
+        num_attention_heads: int | None = None,
+        num_experts_per_tok: int | None = None,
+        num_hidden_layers: int | None = 0,
+        num_key_value_heads: int | None = None,
+        param_sink_number: int | None = 0,
+        q_lora_rank: int | None = None,
+        qk_nope_head_dim: int | None = None,
+        qk_rope_head_dim: int | None = None,
+        rms_norm_eps: float | None = 1e-5,
+        rope_interleave: bool | None = False,
+        rope_parameters: RopeParameters | dict[str, RopeParameters] | None = None,
+        routed_scaling_factor: float | None = None,
+        router_sliding_window: int | None = 0,
+        sandwich_norm: bool | None = False,
+        sliding_window: int | list[int] | None = None,
+        swa_layers: list[str] | None = None,
+        use_cache: bool | None = True,
+        use_mhc: bool | None = False,
+        v_head_dim: int | None = None,
+        vocab_size: int | None = None,
         **kwargs,
     ):
         self.vocab_size = vocab_size
@@ -140,7 +118,6 @@ class OpenPanguV2Config(PreTrainedConfig):
         self.kv_lora_rank = kv_lora_rank
         self.q_lora_rank = q_lora_rank
         self.qk_rope_head_dim = qk_rope_head_dim
-        self.v_head_dim = v_head_dim
         self.qk_nope_head_dim = qk_nope_head_dim
         if qk_rope_head_dim is not None and qk_nope_head_dim is not None:
             self.head_dim = qk_rope_head_dim
@@ -186,7 +163,6 @@ class OpenPanguV2Config(PreTrainedConfig):
             )
 
         super().__init__(**kwargs)
-
 
 
 __all__ = ["OpenPanguV2Config"]
