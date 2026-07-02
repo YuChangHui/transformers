@@ -68,6 +68,7 @@ class OpenPanguV2Config(PreTrainedConfig):
         num_experts_per_tok: int | None = None,
         num_hidden_layers: int | None = 0,
         num_key_value_heads: int | None = None,
+        pad_token_id: int | None = 2,
         param_sink_number: int | None = 0,
         q_lora_rank: int | None = None,
         qk_nope_head_dim: int | None = None,
@@ -86,6 +87,7 @@ class OpenPanguV2Config(PreTrainedConfig):
         vocab_size: int | None = None,
         **kwargs,
     ):
+        self.pad_token_id = pad_token_id
         self.vocab_size = vocab_size
         self.max_position_embeddings = max_position_embeddings
         self.hidden_size = hidden_size
