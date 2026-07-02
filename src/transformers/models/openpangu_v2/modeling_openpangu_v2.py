@@ -272,10 +272,10 @@ class mHCModule(nn.Module):
         x: (B, S, n * H)
         """
         dtype = x.dtype
-        # x = x.float()
+        target_dtype = self.phi.weight.dtype
         rsqrt = torch.rsqrt(x.square().mean(-1, keepdim=True) + self.norm_eps)
         if self.mhc_use_gamma:
-            weight = self.phi((x * rsqrt * self.norm_gamma.unsqueeze(0)).to(torch.bfloat16))
+            weight = self.phi((x * rsqrt * self.norm_gamma.unsqueeze(0)).to(target_dtype))
         else:
             weight = self.phi(x) * rsqrt
 
