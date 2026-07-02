@@ -24,7 +24,7 @@ from torch.nn import functional as F
 from transformers.cache_utils import Cache
 from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
 from transformers.modeling_outputs import BaseModelOutputWithPast
-from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
 from transformers.processing_utils import Unpack
 from transformers.utils import logging
 from transformers.models.llama.modeling_llama import (
@@ -46,11 +46,13 @@ from transformers.models.mixtral.modeling_mixtral import MixtralExperts
 from transformers.models.phi.modeling_phi import PhiRotaryEmbedding
 
 from ...cache_utils import Cache, DynamicCache
+from ... import initialization as init
 from ...integrations import use_kernel_forward_from_hub
 from ...masking_utils import create_causal_mask, create_sliding_window_causal_mask
 from ...utils import TransformersKwargs, auto_docstring, logging
 from ...utils.import_utils import get_torch_version
-from ...utils.generic import check_model_inputs
+from ...utils.generic import check_model_inputs, merge_with_config_defaults
+from ...utils.output_capturing import OutputRecorder, capture_outputs
 from .configuration_openpangu_v2 import OpenPanguV2Config
 
 
@@ -865,11 +867,48 @@ class OpenPanguV2DecoderLayer(LlamaDecoderLayer):
 
 
 class OpenPanguV2PreTrainedModel(LlamaPreTrainedModel):
+    _supports_flash_attn = False
+    _supports_sdpa = False
+    _supports_flex_attn = False
     # MLA does not output attention weights
     # Override parent's _can_record_outputs to remove "attentions"
     _can_record_outputs = {
         "hidden_states": OpenPanguV2DecoderLayer
     }
+
+    @torch.no_grad()
+    def _init_weights(self, module):
+        PreTrainedModel._init_weights(self, module)
+        std = 0.02
+        
+        if isinstance(module, mHCModule):
+            # Initialize MHC bfloat16 parameters
+            if hasattr(module, 'norm_gamma'):
+                init.normal_(module.norm_gamma, mean=0.0, std=std)
+            if hasattr(module, 'branch_alpha'):
+                init.normal_(module.branch_alpha, mean=0.0, std=std)
+            if hasattr(module, 'branch_beta'):
+                init.normal_(module.branch_beta, mean=0.0, std=std)
+            if hasattr(module, 'branch_alpha_pre'):
+                init.normal_(module.branch_alpha_pre, mean=0.0, std=std)
+            if hasattr(module, 'branch_beta_pre'):
+                init.normal_(module.branch_beta_pre, mean=0.0, std=std)
+        
+        elif isinstance(module, DsaIndexer):
+            init.normal_(module.wq_b, mean=0.0, std=std)
+            init.normal_(module.wk, mean=0.0, std=std)
+            init.normal_(module.weights_proj.weight, mean=0.0, std=std)
+        
+        elif isinstance(module, OpenPanguV2Attention):
+            # Initialize sink token parameters
+            if hasattr(module, 'param_sink_k_pe'):
+                init.normal_(module.param_sink_k_pe, mean=0.0, std=std)
+            if hasattr(module, 'param_sink_compressed_kv'):
+                init.normal_(module.param_sink_compressed_kv, mean=0.0, std=std)
+        
+        elif isinstance(module, OpenPanguV2Experts):
+            init.normal_(module.gate_up_proj, mean=0.0, std=std)
+            init.normal_(module.down_proj, mean=0.0, std=std)
 
 
 class OpenPanguV2Model(LlamaModel):
@@ -884,7 +923,8 @@ class OpenPanguV2Model(LlamaModel):
                 merge_layer_only_pre=True,
             )
 
-    @check_model_inputs
+    @merge_with_config_defaults
+    @capture_outputs
     @auto_docstring
     def forward(
         self,

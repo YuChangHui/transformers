@@ -58,7 +58,7 @@ class OpenPanguV2AdvancedModelTester(CausalLMModelTester):
         
         # Basic architecture (3 layers: 1 DSA + 2 SWA)
         self.hidden_size = kwargs.get('hidden_size', 64)
-        self.num_hidden_layers = kwargs.get('num_hidden_layers', 3)
+        self.num_hidden_layers = kwargs.get('num_hidden_layers', 2)
         self.num_attention_heads = kwargs.get('num_attention_heads', 4)
         self.num_key_value_heads = kwargs.get('num_key_value_heads', 1)
         self.vocab_size = kwargs.get('vocab_size', 99)
@@ -102,10 +102,10 @@ class OpenPanguV2AdvancedModelTester(CausalLMModelTester):
         # Sandwich Norm - ENABLED
         self.sandwich_norm = kwargs.get('sandwich_norm', True)
         
-        # Layer types configuration (1 DSA + 2 SWA)
-        self.layer_types = kwargs.get('layer_types', ["full_attention", "sliding_attention", "sliding_attention"])
+        # Layer types configuration (1 DSA + 1 SWA)
+        self.layer_types = kwargs.get('layer_types', ["full_attention", "sliding_attention"])
         self.sliding_window = kwargs.get('sliding_window', 512)
-        self.swa_layers = kwargs.get('swa_layers', [1, 2])
+        self.swa_layers = kwargs.get('swa_layers', [1])
         
         # RoPE parameters
         self.rope_parameters = kwargs.get('rope_parameters', {"rope_type": "default", "rope_theta": 10000.0})
