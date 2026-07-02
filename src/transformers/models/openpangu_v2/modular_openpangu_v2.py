@@ -865,7 +865,11 @@ class OpenPanguV2DecoderLayer(LlamaDecoderLayer):
 
 
 class OpenPanguV2PreTrainedModel(LlamaPreTrainedModel):
-    pass
+    # MLA does not output attention weights
+    # Override parent's _can_record_outputs to remove "attentions"
+    _can_record_outputs = {
+        "hidden_states": OpenPanguV2DecoderLayer
+    }
 
 
 class OpenPanguV2Model(LlamaModel):
