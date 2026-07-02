@@ -520,13 +520,11 @@ class OpenPanguV2Attention(nn.Module):
             self.param_sink_k_pe = torch.nn.Parameter(
                 torch.empty(
                     (self.param_sink_number, self.qk_rope_head_dim),
-                    dtype=config.torch_dtype,
                 )
             )
             self.param_sink_compressed_kv = torch.nn.Parameter(
                 torch.empty(
                     (self.param_sink_number, self.kv_lora_rank),
-                    dtype=config.torch_dtype,
                 )
             )
 

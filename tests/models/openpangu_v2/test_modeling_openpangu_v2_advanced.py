@@ -223,7 +223,7 @@ class OpenPanguV2AdvancedModelTest(CausalLMModelTest, unittest.TestCase):
         # values: (batch, num_kv_heads, seq_length, v_head_dim)
         expected_common_shape = (
             batch_size,
-            getattr(config, "num_key_value_heads", config.num_attention_heads),
+            getattr(config, "num_attention_heads"),
             seq_length,
         )
         expected_key_shape = expected_common_shape + (config.qk_nope_head_dim + config.qk_rope_head_dim,)
