@@ -1072,10 +1072,9 @@ class OpenPanguV2PreTrainedModel(PreTrainedModel):
 
     _can_compile_fullgraph = True
     _supports_attention_backend = True
-    _can_record_outputs = {
-        "hidden_states": OpenPanguV2DecoderLayer,
-        "attentions": OpenPanguV2Attention,
-    }
+    # MLA does not output attention weights
+    # Override parent's _can_record_outputs to remove "attentions"
+    _can_record_outputs = {"hidden_states": OpenPanguV2DecoderLayer}
 
 
 @auto_docstring
