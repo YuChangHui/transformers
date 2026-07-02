@@ -1109,6 +1109,10 @@ class OpenPanguV2PreTrainedModel(PreTrainedModel):
             init.normal_(module.gate_up_proj, mean=0.0, std=std)
             init.normal_(module.down_proj, mean=0.0, std=std)
 
+        elif isinstance(module, OpenPanguV2SparseMoeBlock):
+            # Initialize MoE block's e_score_correction_bias buffer
+            init.zeros_(module.e_score_correction_bias)
+
 
 @auto_docstring
 class OpenPanguV2Model(OpenPanguV2PreTrainedModel):
