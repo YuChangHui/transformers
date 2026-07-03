@@ -353,7 +353,12 @@ class WindowBuffer:
         if self.cache_len <= 0:
             return None
 
-        if self.cache is None:
+        cache_invalid = (
+            self.cache is None
+            or self.cache.shape[0] != hidden_states.shape[0]
+            or self.cache.device != hidden_states.device
+        )
+        if cache_invalid:
             B, S, H = hidden_states.shape
             if self.cache_len > S:
                 padding = torch.zeros(
@@ -383,9 +388,12 @@ class WindowBuffer:
         else:
             if S > 1:
                 self.reset()
+            cache_valid = (
+                self.cache is not None and self.cache.shape[0] == B and self.cache.device == hidden_states.device
+            )
             current_cache = (
                 self.cache
-                if self.cache is not None
+                if cache_valid
                 else torch.zeros((B, self.cache_len, H), device=hidden_states.device, dtype=hidden_states.dtype)
             )
 
