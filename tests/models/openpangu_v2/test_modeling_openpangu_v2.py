@@ -41,74 +41,55 @@ class OpenPanguV2ModelTester(CausalLMModelTester):
     
     def __init__(self, parent, **kwargs):
         super().__init__(parent, **kwargs)
-        
-        # Force eager attention implementation for MHC compatibility
-        # Must be set BEFORE other kwargs to ensure it's applied
-        kwargs.setdefault('_attn_implementation', 'eager')
-        
-        # Basic architecture (3 layers: 1 DSA + 2 SWA)
-        self.hidden_size = kwargs.get('hidden_size', 64)
-        self.num_hidden_layers = kwargs.get('num_hidden_layers', 2)
-        self.num_attention_heads = kwargs.get('num_attention_heads', 4)
-        self.num_key_value_heads = kwargs.get('num_key_value_heads', 1)
-        self.vocab_size = kwargs.get('vocab_size', 99)
-        self.intermediate_size = kwargs.get('intermediate_size', 64)
-        self.max_position_embeddings = kwargs.get('max_position_embeddings', 512)
-        
-        # MLA parameters (Multi-head Latent Attention)
-        self.q_lora_rank = kwargs.get('q_lora_rank', 32)
-        self.kv_lora_rank = kwargs.get('kv_lora_rank', 16)
-        self.qk_nope_head_dim = kwargs.get('qk_nope_head_dim', 32)
-        self.qk_rope_head_dim = kwargs.get('qk_rope_head_dim', 16)
-        self.v_head_dim = kwargs.get('v_head_dim', 32)
-        
-        # MoE parameters (Mixture of Experts)
-        self.moe_intermediate_size = kwargs.get('moe_intermediate_size', 64)
-        self.n_routed_experts = kwargs.get('n_routed_experts', 4)
-        self.n_shared_experts = kwargs.get('n_shared_experts', 1)
-        self.num_experts_per_tok = kwargs.get('num_experts_per_tok', 2)
-        self.first_k_dense_replace = kwargs.get('first_k_dense_replace', 1)  # Layer 0 dense, layers 1,2 MoE
-        self.routed_scaling_factor = kwargs.get('routed_scaling_factor', 2.5)
-        self.norm_topk_prob = kwargs.get('norm_topk_prob', True)
-        
-        # DSA parameters (Dynamic Sparse Attention) - ENABLED on layer 0
-        self.dsa_layers = kwargs.get('dsa_layers', [0])
-        self.index_topk = kwargs.get('index_topk', 8)  # Simplified from real 2048
-        self.index_n_heads = kwargs.get('index_n_heads', 2)
-        self.index_head_dim = kwargs.get('index_head_dim', 16)
-        
-        # MHC parameters (Multi-Head Connection) - ENABLED with real num_stream=4
-        self.use_mhc = kwargs.get('use_mhc', True)
-        self.mhc_num_stream = kwargs.get('mhc_num_stream', 4)  # Real model value
-        self.mhc_recur_norm = kwargs.get('mhc_recur_norm', 3)  # Simplified iterations
-        self.mhc_use_gamma = kwargs.get('mhc_use_gamma', True)
-        
-        # Sink Tokens - ENABLED
-        self.param_sink_number = kwargs.get('param_sink_number', 4)  # Simplified from real 128
-        
-        # MOME parameters (Router Convolution) - ENABLED
-        self.router_sliding_window = kwargs.get('router_sliding_window', 3)  # Real model value
-        
-        # Sandwich Norm - ENABLED
-        self.sandwich_norm = kwargs.get('sandwich_norm', True)
-        
-        # Layer types configuration (1 DSA + 1 SWA)
-        self.layer_types = kwargs.get('layer_types', ["full_attention", "sliding_attention"])
-        self.sliding_window = kwargs.get('sliding_window', 512)
-        self.swa_layers = kwargs.get('swa_layers', [1])
-        
-        # RoPE parameters
-        self.rope_parameters = kwargs.get('rope_parameters', {"rope_type": "default", "rope_theta": 10000.0})
-        self.rope_interleave = kwargs.get('rope_interleave', False)
-        self.rope_theta = kwargs.get('rope_theta', 10000.0)
-        
-        # Other parameters
-        self.attention_dropout = kwargs.get('attention_dropout', 0.0)
-        self.rms_norm_eps = kwargs.get('rms_norm_eps', 1e-5)
-        self.bos_token_id = kwargs.get('bos_token_id', 1)
-        self.eos_token_id = kwargs.get('eos_token_id', 2)
-        self.pad_token_id = kwargs.get('pad_token_id', 0)
-        self.block_post_layernorm_idx = kwargs.get('block_post_layernorm_idx', None)
+        # Standard CausalLMModelTester knobs — override the parent's defaults.
+        self.hidden_size = 64
+        self.num_attention_heads = 4
+        self.num_key_value_heads = 1
+        self.num_hidden_layers = 2
+        self.intermediate_size = 64
+        self.max_position_embeddings = 512
+        # MLA parameters.
+        self.q_lora_rank = 32
+        self.kv_lora_rank = 16
+        self.qk_nope_head_dim = 32
+        self.qk_rope_head_dim = 16
+        self.v_head_dim = 32
+        # MoE parameters.
+        self.moe_intermediate_size = 64
+        self.n_routed_experts = 4
+        self.n_shared_experts = 1
+        self.num_experts_per_tok = 2
+        self.first_k_dense_replace = 1
+        self.routed_scaling_factor = 2.5
+        self.norm_topk_prob = True
+        # DSA parameters.
+        self.dsa_layers = [0]
+        self.index_topk = 8
+        self.index_n_heads = 2
+        self.index_head_dim = 16
+        # MHC parameters.
+        self.use_mhc = True
+        self.mhc_num_stream = 4
+        self.mhc_recur_norm = 3
+        self.mhc_use_gamma = True
+        # Sink Tokens.
+        self.param_sink_number = 4
+        # MOME parameters.
+        self.router_sliding_window = 3
+        # Sandwich Norm.
+        self.sandwich_norm = True
+        # Layer types.
+        self.layer_types = ["full_attention", "sliding_attention"]
+        self.sliding_window = 512
+        self.swa_layers = [1]
+        # RoPE parameters.
+        self.rope_parameters = {"rope_type": "default", "rope_theta": 10000.0}
+        self.rope_interleave = False
+        self.rope_theta = 10000.0
+        # Other.
+        self.attention_dropout = 0.0
+        self.rms_norm_eps = 1e-5
+        self.block_post_layernorm_idx = None
     
     def get_config(self):
         """
