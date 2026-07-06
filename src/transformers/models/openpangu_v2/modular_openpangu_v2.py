@@ -284,7 +284,29 @@ class mHCModule(nn.Module):
             weight = self.phi(x) * rsqrt
 
         # (B,S,n), (B,S,n), (B,S,n,n)
-        h_pre, h_post, h_res = self.hc_split_sinkhorn_torch(weight)
+        h_pre, h_post, h_res = weight.split(
+            [self.num_stream, self.num_stream, self.num_stream * self.num_stream], dim=-1
+        )
+        alpha_pre, alpha_post, alpha_res = self.branch_alpha.view(-1).split([1, 1, 1])
+        beta_pre, beta_post, beta_res = self.branch_beta.view(-1).split(
+            [self.num_stream, self.num_stream, self.num_stream * self.num_stream]
+        )
+
+        h_post = 2 * torch.sigmoid(h_post * alpha_post + beta_post)
+        h_res = h_res.unflatten(-1, (self.num_stream, self.num_stream))
+        h_res = h_res * alpha_res + beta_res.view(self.num_stream, self.num_stream)
+        # h_res = self.sinkhorn_knopps(h_res, self.mhc_recur_norm, self.hc_eps)
+        h_res = h_res.softmax(-1) + self.hc_eps
+        col_sum = h_res.sum(-2, keepdim=True)
+        h_res = h_res / (col_sum + self.hc_eps)
+        for _ in range(self.mhc_recur_norm - 1):
+            row_sum = h_res.sum(-1, keepdim=True)
+            h_res = h_res / (row_sum + self.hc_eps)
+            col_sum = h_res.sum(-2, keepdim=True)
+            h_res = h_res / (col_sum + self.hc_eps)
+        
+
+        h_pre = torch.sigmoid(h_pre * alpha_pre + beta_pre) + self.hc_eps
 
         # (B,S,H)
         y = torch.sum(h_pre.unsqueeze(-1) * x.unflatten(dim=-1, sizes=(self.num_stream, -1)), dim=-2)
@@ -303,33 +325,6 @@ class mHCModule(nn.Module):
         )
         return y.view(residual.shape).type_as(x)
 
-    def hc_split_sinkhorn_torch(self, weight):
-        h_pre, h_post, h_res = weight.split(
-            [self.num_stream, self.num_stream, self.num_stream * self.num_stream], dim=-1
-        )
-        alpha_pre, alpha_post, alpha_res = self.branch_alpha.view(-1).split([1, 1, 1])
-        beta_pre, beta_post, beta_res = self.branch_beta.view(-1).split(
-            [self.num_stream, self.num_stream, self.num_stream * self.num_stream]
-        )
-
-        h_post = 2 * torch.sigmoid(h_post * alpha_post + beta_post)
-        h_res = h_res.unflatten(-1, (self.num_stream, self.num_stream))
-        h_res = h_res * alpha_res + beta_res.view(self.num_stream, self.num_stream)
-        h_res = self.sinkhorn_knopps(h_res, self.mhc_recur_norm, self.hc_eps)
-
-        h_pre = torch.sigmoid(h_pre * alpha_pre + beta_pre) + self.hc_eps
-        return h_pre, h_post, h_res
-
-    def sinkhorn_knopps(self, h_res, sinkhorn_iters, eps):
-        h_res = h_res.softmax(-1) + eps
-        col_sum = h_res.sum(-2, keepdim=True)
-        h_res = h_res / (col_sum + eps)
-        for _ in range(sinkhorn_iters - 1):
-            row_sum = h_res.sum(-1, keepdim=True)
-            h_res = h_res / (row_sum + eps)
-            col_sum = h_res.sum(-2, keepdim=True)
-            h_res = h_res / (col_sum + eps)
-        return h_res
     
 class OpenPanguV2HyperHead(nn.Module):
     def __init__(self, config: OpenPanguV2Config):
