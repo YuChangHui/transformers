@@ -330,6 +330,39 @@ class mHCModule(nn.Module):
         return h_res
 
 
+class OpenPanguV2HyperHead(nn.Module):
+    def __init__(self, config: OpenPanguV2Config):
+        super().__init__()
+        self.num_stream = config.mhc_num_stream
+        self.hidden_size = config.hidden_size
+        self.mhc_use_gamma = config.mhc_use_gamma
+        self.hc_eps = 1e-6
+        self.norm_eps = config.rms_norm_eps
+        self.phi = nn.Linear(
+            self.hidden_size * self.num_stream,
+            self.num_stream,
+            bias=False,
+            dtype=torch.bfloat16,
+        )
+        self.branch_alpha_pre = nn.Parameter(torch.empty(1, dtype=torch.bfloat16))
+        self.branch_beta_pre = nn.Parameter(torch.empty(self.num_stream, dtype=torch.bfloat16))
+        if self.mhc_use_gamma:
+            self.norm_gamma = nn.Parameter(torch.empty(self.hidden_size * self.num_stream, dtype=torch.bfloat16))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        target_dtype = self.phi.weight.dtype
+        rsqrt = torch.rsqrt(x.square().mean(-1, keepdim=True) + self.norm_eps)
+        if self.mhc_use_gamma:
+            weight = self.phi((x * rsqrt * self.norm_gamma.unsqueeze(0)).to(target_dtype))
+        else:
+            weight = self.phi(x) * rsqrt
+
+        h_pre = weight
+        h_pre = torch.sigmoid(h_pre * self.branch_alpha_pre + self.branch_beta_pre) + self.hc_eps
+        y = torch.sum(h_pre.unsqueeze(-1) * x.unflatten(dim=-1, sizes=(self.num_stream, -1)), dim=-2)
+        return y.to(x.dtype)
+
+
 class WindowBuffer:
     def __init__(self, win_size, aggregate_fn):
         self.win_size = win_size
@@ -1115,10 +1148,7 @@ class OpenPanguV2Model(OpenPanguV2PreTrainedModel):
         self.use_mhc = config.use_mhc
         if self.use_mhc:
             self.num_stream = config.mhc_num_stream
-            self.merge_mhc_module = mHCModule(
-                config=config,
-                merge_layer_only_pre=True,
-            )
+            self.merge_mhc_module = OpenPanguV2HyperHead(config)
 
         # Initialize weights and apply final processing
         self.post_init()
@@ -1186,7 +1216,7 @@ class OpenPanguV2Model(OpenPanguV2PreTrainedModel):
             )
 
         if self.use_mhc:
-            hidden_states, _, _ = self.merge_mhc_module.hc_pre(hidden_states)
+            hidden_states = self.merge_mhc_module(hidden_states)
 
         hidden_states = self.norm(hidden_states)
         return BaseModelOutputWithPast(
