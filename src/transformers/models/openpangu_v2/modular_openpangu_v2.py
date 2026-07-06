@@ -250,21 +250,14 @@ class mHCModule(nn.Module):
     def __init__(
         self,
         config: OpenPanguV2Config,
-        merge_layer_only_pre=False,
     ):
         super().__init__()
         self.num_stream = config.mhc_num_stream
         self.hidden_size = config.hidden_size
-        self.merge_layer_only_pre = merge_layer_only_pre
 
-        if not self.merge_layer_only_pre:
-            phi_output_hidden_size = (self.num_stream + 2) * self.num_stream
-            self.branch_alpha = nn.Parameter(torch.empty(3, dtype=torch.bfloat16))
-            self.branch_beta = nn.Parameter(torch.empty(self.num_stream * (self.num_stream + 2), dtype=torch.bfloat16))
-        else:
-            phi_output_hidden_size = self.num_stream
-            self.branch_alpha_pre = nn.Parameter(torch.empty(1, dtype=torch.bfloat16))
-            self.branch_beta_pre = nn.Parameter(torch.empty(self.num_stream, dtype=torch.bfloat16))
+        phi_output_hidden_size = (self.num_stream + 2) * self.num_stream
+        self.branch_alpha = nn.Parameter(torch.empty(3, dtype=torch.bfloat16))
+        self.branch_beta = nn.Parameter(torch.empty(self.num_stream * (self.num_stream + 2), dtype=torch.bfloat16))
         self.phi = nn.Linear(
             self.hidden_size * self.num_stream,
             phi_output_hidden_size,
@@ -304,8 +297,6 @@ class mHCModule(nn.Module):
         h_post: (B, S, n)
         h_res: (B, S, n, n)
         """
-        if self.merge_layer_only_pre:
-            return x
 
         y = h_post.unsqueeze(-1) * x.unsqueeze(-2) + torch.sum(
             h_res.unsqueeze(-1) * residual.unflatten(dim=-1, sizes=(self.num_stream, -1)).unsqueeze(-2), dim=-3
@@ -313,25 +304,19 @@ class mHCModule(nn.Module):
         return y.view(residual.shape).type_as(x)
 
     def hc_split_sinkhorn_torch(self, weight):
-        if not self.merge_layer_only_pre:
-            h_pre, h_post, h_res = weight.split(
-                [self.num_stream, self.num_stream, self.num_stream * self.num_stream], dim=-1
-            )
-            alpha_pre, alpha_post, alpha_res = self.branch_alpha.view(-1).split([1, 1, 1])
-            beta_pre, beta_post, beta_res = self.branch_beta.view(-1).split(
-                [self.num_stream, self.num_stream, self.num_stream * self.num_stream]
-            )
+        h_pre, h_post, h_res = weight.split(
+            [self.num_stream, self.num_stream, self.num_stream * self.num_stream], dim=-1
+        )
+        alpha_pre, alpha_post, alpha_res = self.branch_alpha.view(-1).split([1, 1, 1])
+        beta_pre, beta_post, beta_res = self.branch_beta.view(-1).split(
+            [self.num_stream, self.num_stream, self.num_stream * self.num_stream]
+        )
 
-            h_post = 2 * torch.sigmoid(h_post * alpha_post + beta_post)
-            h_res = h_res.unflatten(-1, (self.num_stream, self.num_stream))
-            h_res = h_res * alpha_res + beta_res.view(self.num_stream, self.num_stream)
-            h_res = self.sinkhorn_knopps(h_res, self.mhc_recur_norm, self.hc_eps)
-        else:
-            h_pre = weight
-            h_post = None
-            h_res = None
-            alpha_pre = self.branch_alpha_pre
-            beta_pre = self.branch_beta_pre
+        h_post = 2 * torch.sigmoid(h_post * alpha_post + beta_post)
+        h_res = h_res.unflatten(-1, (self.num_stream, self.num_stream))
+        h_res = h_res * alpha_res + beta_res.view(self.num_stream, self.num_stream)
+        h_res = self.sinkhorn_knopps(h_res, self.mhc_recur_norm, self.hc_eps)
+
         h_pre = torch.sigmoid(h_pre * alpha_pre + beta_pre) + self.hc_eps
         return h_pre, h_post, h_res
 
